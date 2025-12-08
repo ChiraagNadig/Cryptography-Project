@@ -9,6 +9,7 @@ import json
 import os
 import hashlib
 import base64
+import re
 from datetime import datetime, timezone, timedelta
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
@@ -177,6 +178,29 @@ def verify_user_cert(username):
     except Exception:
         return None
 
+# --- Password Validation ---
+
+def validate_password(password):
+    """
+    Validates password strength requirements:
+    - Minimum 8 characters
+    - At least one number
+    - At least one special character
+    
+    Returns (bool, error_message).
+    """
+    if len(password) < 8:
+        return (False, "Password must be at least 8 characters long.")
+    
+    if not re.search(r'\d', password):
+        return (False, "Password must contain at least one number.")
+    
+    # Check for special characters (any non-alphanumeric, non-space character)
+    if not re.search(r'[^a-zA-Z0-9\s]', password):
+        return (False, "Password must contain at least one special character (e.g., !@#$%^&*(),.?\":{}|<>).")
+    
+    return (True, "")
+
 # --- Core Logic Functions ---
 
 def register_user(username, password):
@@ -187,6 +211,11 @@ def register_user(username, password):
     users = load_users()
     if username in users:
         return (False, "Username already exists. Please choose another one.")
+    
+    # Validate password strength
+    is_valid, error_msg = validate_password(password)
+    if not is_valid:
+        return (False, error_msg)
     
     try:
         hash_with_salt = ph.hash(password)
@@ -267,6 +296,194 @@ def login_user(username, password):
         return (False, None, None, "Login failed: Incorrect password or corrupted key.")
     except Exception as e:
         return (False, None, None, f"An error occurred during login: {e}")
+
+def change_password(username, current_password, new_password):
+    """
+    Handles password change for a user.
+    Requires current password verification and re-encrypts the private key.
+    Also re-encrypts all DEKs (Data Encryption Keys) for user's entries since
+    the master key is derived from the password.
+    Returns (bool, message).
+    """
+    users = load_users()
+    if username not in users:
+        return (False, "User not found.")
+    
+    user_data = users[username]
+    stored_hash = user_data['hash']
+    
+    # Verify current password
+    try:
+        ph.verify(stored_hash, current_password)
+    except VerifyMismatchError:
+        return (False, "Current password is incorrect.")
+    
+    # Validate new password strength
+    is_valid, error_msg = validate_password(new_password)
+    if not is_valid:
+        return (False, error_msg)
+    
+    try:
+        # Derive old master key from current password (using salt from old hash)
+        parts = stored_hash.split('$')
+        old_salt_b64 = parts[4]
+        old_salt_b64 += '=' * (-len(old_salt_b64) % 4)
+        old_salt = base64.b64decode(old_salt_b64)
+        old_master_key = hashlib.pbkdf2_hmac(
+            'sha256', current_password.encode('utf-8'), old_salt, 600000, dklen=32
+        )
+        
+        # Decrypt the private key with old password
+        encrypted_priv_key_pem = user_data['encrypted_private_key']
+        signing_key = RSA.import_key(encrypted_priv_key_pem, passphrase=current_password)
+        
+        # Generate new password hash (this will have a new salt)
+        new_hash = ph.hash(new_password)
+        
+        # Extract salt from new hash and derive new master key
+        new_parts = new_hash.split('$')
+        new_salt_b64 = new_parts[4]
+        new_salt_b64 += '=' * (-len(new_salt_b64) % 4)
+        new_salt = base64.b64decode(new_salt_b64)
+        new_master_key = hashlib.pbkdf2_hmac(
+            'sha256', new_password.encode('utf-8'), new_salt, 600000, dklen=32
+        )
+        
+        # Re-encrypt the private key with new password
+        new_encrypted_private_key = signing_key.export_key(
+            passphrase=new_password, pkcs=8, protection="scryptAndAES128-CBC"
+        ).decode('utf-8')
+        
+        # Re-encrypt all DEKs for user's entries
+        entries = load_entries()
+        user_entries = entries.get(username, {})
+        entries_updated = 0
+        
+        for entry_id, entry_data in user_entries.items():
+            try:
+                # Decrypt DEK with old master key
+                nonce_dek = bytes.fromhex(entry_data['nonce_dek'])
+                tag_dek = bytes.fromhex(entry_data['tag_dek'])
+                ciphertext_dek = bytes.fromhex(entry_data['encrypted_dek'])
+                cipher_dek_old = AES.new(old_master_key, AES.MODE_GCM, nonce=nonce_dek)
+                dek = cipher_dek_old.decrypt_and_verify(ciphertext_dek, tag_dek)
+                
+                # Re-encrypt DEK with new master key
+                new_nonce_dek = get_random_bytes(12)
+                cipher_dek_new = AES.new(new_master_key, AES.MODE_GCM, nonce=new_nonce_dek)
+                new_ciphertext_dek, new_tag_dek = cipher_dek_new.encrypt_and_digest(dek)
+                
+                # Update entry with new encrypted DEK
+                entry_data['encrypted_dek'] = new_ciphertext_dek.hex()
+                entry_data['nonce_dek'] = new_nonce_dek.hex()
+                entry_data['tag_dek'] = new_tag_dek.hex()
+                entries_updated += 1
+            except Exception:
+                # If we can't decrypt an entry, skip it (might be corrupted)
+                continue
+        
+        # Save updated entries
+        if entries_updated > 0:
+            save_entries(entries)
+        
+        # Update user data
+        users[username]['hash'] = new_hash
+        users[username]['encrypted_private_key'] = new_encrypted_private_key
+        save_users(users)
+        
+        return (True, f"Password changed successfully! {entries_updated} journal entries updated. Please log in again with your new password.")
+        
+    except Exception as e:
+        return (False, f"An error occurred while changing password: {e}")
+
+def change_username(old_username, password, new_username):
+    """
+    Handles username change for a user.
+    This is a complex operation that updates all references to the user across the system.
+    Returns (bool, message).
+    """
+    users = load_users()
+    
+    # Verify user exists and password is correct
+    if old_username not in users:
+        return (False, "User not found.")
+    
+    if new_username in users:
+        return (False, "New username already exists. Please choose another one.")
+    
+    user_data = users[old_username]
+    stored_hash = user_data['hash']
+    
+    # Verify password
+    try:
+        ph.verify(stored_hash, password)
+    except VerifyMismatchError:
+        return (False, "Password is incorrect.")
+    
+    try:
+        # Decrypt private key to get the key object
+        encrypted_priv_key_pem = user_data['encrypted_private_key']
+        user_key_obj = RSA.import_key(encrypted_priv_key_pem, passphrase=password)
+        
+        # Load Root CA key for re-issuing certificate
+        with open(ROOT_CA_KEY, 'rb') as f:
+            ca_priv_key = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
+        
+        # Generate new certificate with new username
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"user_{new_username}")])
+        user_public_key_for_cert = user_key_obj.publickey()
+        
+        builder = x509.CertificateBuilder().subject_name(
+            subject
+        ).issuer_name(
+            ROOT_CA_PUBLIC_CERT.subject
+        ).public_key(
+            serialization.load_pem_public_key(
+                user_public_key_for_cert.export_key(), backend=default_backend()
+            )
+        ).serial_number(
+            x509.random_serial_number()
+        ).not_valid_before(
+            datetime.now(timezone.utc)
+        ).not_valid_after(
+            datetime.now(timezone.utc) + timedelta(days=365)
+        ).add_extension(
+            x509.BasicConstraints(ca=False, path_length=None), critical=True,
+        )
+        
+        new_user_cert = builder.sign(ca_priv_key, hashes.SHA256(), default_backend())
+        
+        # Create new user entry
+        users[new_username] = {
+            "hash": user_data['hash'],
+            "user_certificate": new_user_cert.public_bytes(serialization.Encoding.PEM).decode('utf-8'),
+            "encrypted_private_key": user_data['encrypted_private_key']  # Same key, same password
+        }
+        
+        # Delete old user entry
+        del users[old_username]
+        save_users(users)
+        
+        # Update entries.json - move all entries from old username to new
+        entries = load_entries()
+        if old_username in entries:
+            entries[new_username] = entries[old_username]
+            del entries[old_username]
+            save_entries(entries)
+        
+        # Update shares.json - update owner and recipient fields
+        shares = load_shares()
+        for share in shares:
+            if share.get('entry_owner') == old_username:
+                share['entry_owner'] = new_username
+            if share.get('recipient') == old_username:
+                share['recipient'] = new_username
+        save_shares(shares)
+        
+        return (True, f"Username changed from '{old_username}' to '{new_username}' successfully! Please log in again with your new username.")
+        
+    except Exception as e:
+        return (False, f"An error occurred while changing username: {e}")
 
 def write_new_entry(username, master_key, signing_key, plaintext):
     """

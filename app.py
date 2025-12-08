@@ -44,19 +44,33 @@ def show_login_page():
 
 def show_register_page():
     st.title("Register New User")
+    
+    # Display password requirements
+    st.info("""
+    **Password Requirements:**
+    - Minimum 8 characters
+    - At least one number (0-9)
+    - At least one special character (!@#$%^&*(),.?":{}|<>)
+    """)
+    
     with st.form("register_form"):
         username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
+        password = st.text_input("Password", type="password", help="Must be at least 8 characters with a number and special character")
         submitted = st.form_submit_button("Register")
 
         if submitted:
-            with st.spinner("Generating keys and certificate... This may take a moment."):
-                success, message = backend.register_user(username, password)
-            if success:
-                st.success(message)
-                st.info("You can now log in.")
+            if not username:
+                st.error("Username is required.")
+            elif not password:
+                st.error("Password is required.")
             else:
-                st.error(message)
+                with st.spinner("Generating keys and certificate... This may take a moment."):
+                    success, message = backend.register_user(username, password)
+                if success:
+                    st.success(message)
+                    st.info("You can now log in.")
+                else:
+                    st.error(message)
 
 def show_write_entry_page():
     st.title("Write a New Journal Entry")
@@ -140,6 +154,81 @@ def show_shared_with_me_page():
         with st.expander(f"Entry from {entry['owner']} (ID: {entry['id']})"):
             st.markdown(f"> {entry['message']}")
 
+def show_account_settings_page():
+    st.title("Account Settings")
+    
+    st.subheader("Change Password")
+    
+    # Display password requirements
+    st.info("""
+    **New Password Requirements:**
+    - Minimum 8 characters
+    - At least one number (0-9)
+    - At least one special character (!@#$%^&*(),.?":{}|<>)
+    """)
+    
+    with st.form("change_password_form"):
+        current_password = st.text_input("Current Password", type="password")
+        new_password = st.text_input("New Password", type="password", help="Must be at least 8 characters with a number and special character")
+        confirm_password = st.text_input("Confirm New Password", type="password")
+        submitted = st.form_submit_button("Change Password")
+        
+        if submitted:
+            if not current_password or not new_password or not confirm_password:
+                st.error("All fields are required.")
+            elif new_password != confirm_password:
+                st.error("New passwords do not match.")
+            else:
+                # Backend validation will check all password requirements
+                success, message = backend.change_password(
+                    st.session_state['username'],
+                    current_password,
+                    new_password
+                )
+                if success:
+                    st.success(message)
+                    st.warning("⚠️ You will be logged out. Please log in again with your new password.")
+                    # Clear session state to force re-login
+                    if st.button("Logout Now"):
+                        for key in list(st.session_state.keys()):
+                            del st.session_state[key]
+                        st.rerun()
+                else:
+                    st.error(message)
+    
+    st.divider()
+    
+    st.subheader("Change Username")
+    st.info("⚠️ Changing your username will update all your journal entries and shared entries. This action cannot be undone.")
+    with st.form("change_username_form"):
+        password = st.text_input("Enter Password to Confirm", type="password", key="username_password")
+        new_username = st.text_input("New Username")
+        submitted_username = st.form_submit_button("Change Username")
+        
+        if submitted_username:
+            if not password or not new_username:
+                st.error("Both password and new username are required.")
+            elif new_username == st.session_state['username']:
+                st.error("New username must be different from current username.")
+            elif len(new_username) < 3:
+                st.error("Username must be at least 3 characters long.")
+            else:
+                success, message = backend.change_username(
+                    st.session_state['username'],
+                    password,
+                    new_username
+                )
+                if success:
+                    st.success(message)
+                    st.warning("⚠️ You will be logged out. Please log in again with your new username.")
+                    # Clear session state to force re-login
+                    if st.button("Logout Now", key="logout_after_username"):
+                        for key in list(st.session_state.keys()):
+                            del st.session_state[key]
+                        st.rerun()
+                else:
+                    st.error(message)
+
 
 # --- Main App Logic ---
 
@@ -150,7 +239,7 @@ if st.session_state['logged_in']:
     
     page = st.sidebar.radio(
         "Navigation",
-        ["Write Entry", "My Entries", "Share Entry", "View Shared with Me"]
+        ["Write Entry", "My Entries", "Share Entry", "View Shared with Me", "Account Settings"]
     )
     
     if st.sidebar.button("Logout"):
@@ -175,3 +264,5 @@ elif page == "Share Entry":
     show_share_entry_page()
 elif page == "View Shared with Me":
     show_shared_with_me_page()
+elif page == "Account Settings":
+    show_account_settings_page()
