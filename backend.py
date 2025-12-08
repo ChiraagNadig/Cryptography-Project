@@ -33,6 +33,8 @@ ENTRIES_DB = 'entries.json'
 SHARES_DB = 'shares.json'
 ROOT_CA_KEY = 'root_ca.pem'
 ROOT_CA_CERT = 'root_ca.crt'
+# Strong passphrase for Root CA private key protection
+CA_PASSPHRASE = b'SecureJournal_RootCA_2025_ProtectedKey!@#'
 
 ph = PasswordHasher()
 ROOT_CA_PUBLIC_CERT = None # Cache for the root CA cert
@@ -98,11 +100,12 @@ def setup_root_ca():
         private_key = rsa.generate_private_key(
             public_exponent=65537, key_size=2048, backend=default_backend()
         )
+        # Encrypt the Root CA private key with a strong passphrase
         with open(ROOT_CA_KEY, "wb") as f:
             f.write(private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption()
+                encryption_algorithm=serialization.BestAvailableEncryption(CA_PASSPHRASE)
             ))
 
         subject = issuer = x509.Name([
@@ -221,8 +224,9 @@ def register_user(username, password):
         hash_with_salt = ph.hash(password)
         user_key_obj = RSA.generate(2048)
 
+        # Load the encrypted Root CA private key
         with open(ROOT_CA_KEY, 'rb') as f:
-            ca_priv_key = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
+            ca_priv_key = serialization.load_pem_private_key(f.read(), password=CA_PASSPHRASE, backend=default_backend())
 
         subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"user_{username}")])
         user_public_key_for_cert = user_key_obj.publickey()
@@ -425,9 +429,9 @@ def change_username(old_username, password, new_username):
         encrypted_priv_key_pem = user_data['encrypted_private_key']
         user_key_obj = RSA.import_key(encrypted_priv_key_pem, passphrase=password)
         
-        # Load Root CA key for re-issuing certificate
+        # Load encrypted Root CA key for re-issuing certificate
         with open(ROOT_CA_KEY, 'rb') as f:
-            ca_priv_key = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
+            ca_priv_key = serialization.load_pem_private_key(f.read(), password=CA_PASSPHRASE, backend=default_backend())
         
         # Generate new certificate with new username
         subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"user_{new_username}")])
@@ -500,12 +504,15 @@ def write_new_entry(username, master_key, signing_key, plaintext):
         cipher_dek = AES.new(master_key, AES.MODE_GCM, nonce=nonce_dek)
         ciphertext_dek, tag_dek = cipher_dek.encrypt_and_digest(dek)
         
-        data_to_sign = nonce_msg + tag_msg + ciphertext_msg
+        entry_id = datetime.now(timezone.utc).isoformat()
+        
+        # Sign all entry data to ensure complete integrity protection
+        data_to_sign = (entry_id.encode('utf-8') + 
+                       nonce_msg + tag_msg + ciphertext_msg + 
+                       nonce_dek + tag_dek + ciphertext_dek)
         h = SHA256.new(data_to_sign)
         signer = pss.new(signing_key)
         signature = signer.sign(h)
-        
-        entry_id = datetime.now(timezone.utc).isoformat()
         entries = load_entries()
         
         if username not in entries:
@@ -553,8 +560,14 @@ def read_user_entries(username):
             nonce_msg_bytes = bytes.fromhex(entry_data['nonce_msg'])
             tag_msg_bytes = bytes.fromhex(entry_data['tag_msg'])
             ciphertext_msg_bytes = bytes.fromhex(entry_data['encrypted_message'])
+            nonce_dek_bytes = bytes.fromhex(entry_data['nonce_dek'])
+            tag_dek_bytes = bytes.fromhex(entry_data['tag_dek'])
+            ciphertext_dek_bytes = bytes.fromhex(entry_data['encrypted_dek'])
             
-            data_to_verify = nonce_msg_bytes + tag_msg_bytes + ciphertext_msg_bytes
+            # Verify signature over all entry data
+            data_to_verify = (entry_id.encode('utf-8') + 
+                            nonce_msg_bytes + tag_msg_bytes + ciphertext_msg_bytes + 
+                            nonce_dek_bytes + tag_dek_bytes + ciphertext_dek_bytes)
             h = SHA256.new(data_to_verify)
             
             verifier.verify(h, signature)
