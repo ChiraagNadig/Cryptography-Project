@@ -9,7 +9,11 @@ import streamlit as st
 import backend
 
 # --- App Initialization ---
-st.set_page_config(page_title="Secure Journal", layout="wide")
+st.set_page_config(
+    page_title="Secure Journal", 
+    layout="wide",
+    page_icon="📔"
+)
 
 # Initialize the Root CA on first run
 if 'ca_setup' not in st.session_state:
@@ -25,7 +29,7 @@ if 'logged_in' not in st.session_state:
 # --- UI Functions ---
 
 def show_login_page():
-    st.title("Login")
+    st.title("📔 Login")
     with st.form("login_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
@@ -43,7 +47,7 @@ def show_login_page():
                 st.error(message)
 
 def show_register_page():
-    st.title("Register New User")
+    st.title("📝 Register New User")
     
     # Display password requirements
     st.info("""
@@ -73,7 +77,7 @@ def show_register_page():
                     st.error(message)
 
 def show_write_entry_page():
-    st.title("Write a New Journal Entry")
+    st.title("✍️ Write a New Journal Entry")
     with st.form("new_entry_form"):
         entry_text = st.text_area("Your entry:")
         submitted = st.form_submit_button("Save and Sign Entry")
@@ -91,7 +95,7 @@ def show_write_entry_page():
                 st.error(message)
 
 def show_my_entries_page():
-    st.title(f"My Journal Entries for {st.session_state['username']}")
+    st.title(f"📖 My Journal Entries")
     
     entries = backend.read_user_entries(st.session_state['username'])
 
@@ -113,7 +117,7 @@ def show_my_entries_page():
 
 
 def show_share_entry_page():
-    st.title("Share an Entry")
+    st.title("🤝 Share an Entry")
     entries = backend.read_user_entries(st.session_state['username'])
     entry_ids = [e['id'] for e in entries if e['verified']]
 
@@ -139,7 +143,7 @@ def show_share_entry_page():
                 st.error(message)
 
 def show_shared_with_me_page():
-    st.title("Entries Shared With Me")
+    st.title("📬 Entries Shared With Me")
     
     shared_entries = backend.view_shared_entries(
         st.session_state['username'],
@@ -155,7 +159,7 @@ def show_shared_with_me_page():
             st.markdown(f"> {entry['message']}")
 
 def show_account_settings_page():
-    st.title("Account Settings")
+    st.title("⚙️ Account Settings")
     
     st.subheader("Change Password")
     
@@ -232,7 +236,7 @@ def show_account_settings_page():
 
 # --- Main App Logic ---
 
-st.sidebar.title("Secure Journal")
+st.sidebar.title("📔 Secure Journal")
 
 if st.session_state['logged_in']:
     st.sidebar.success(f"Logged in as **{st.session_state['username']}**")

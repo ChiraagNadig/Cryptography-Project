@@ -1,0 +1,11 @@
+[theme]
+# Subtle journal theme with warm, calming colors
+primaryColor = "#8B6F47"        # Warm brown (leather journal)
+backgroundColor = "#FAF8F3"      # Cream/off-white (aged paper)
+secondaryBackgroundColor = "#F0EBE3" # Light beige (paper texture)
+textColor = "#3E3E3E"           # Charcoal (readable, not harsh)
+font = "serif"                   # Classic serif font for journal feel
+
+[server]
+headless = true
+
