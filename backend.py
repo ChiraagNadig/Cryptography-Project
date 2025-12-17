@@ -222,23 +222,26 @@ def register_user(username, password):
     
     try:
         hash_with_salt = ph.hash(password)
-        user_key_obj = RSA.generate(2048)
+        
+        # Generate RSA key pair using cryptography library (not pycryptodome)
+        user_key_obj = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend()
+        )
 
-        # Load the encrypted Root CA private key
+        # Load the unencrypted Root CA private key
         with open(ROOT_CA_KEY, 'rb') as f:
-            ca_priv_key = serialization.load_pem_private_key(f.read(), password=CA_PASSPHRASE, backend=default_backend())
+            ca_priv_key = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
 
         subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"user_{username}")])
-        user_public_key_for_cert = user_key_obj.publickey()
         
         builder = x509.CertificateBuilder().subject_name(
             subject
         ).issuer_name(
             ROOT_CA_PUBLIC_CERT.subject
         ).public_key(
-            serialization.load_pem_public_key(
-                user_public_key_for_cert.export_key(), backend=default_backend()
-            )
+            user_key_obj.public_key()
         ).serial_number(
             x509.random_serial_number()
         ).not_valid_before(
@@ -251,8 +254,11 @@ def register_user(username, password):
         
         user_cert = builder.sign(ca_priv_key, hashes.SHA256(), default_backend())
 
-        encrypted_private_key = user_key_obj.export_key(
-            passphrase=password, pkcs=8, protection="scryptAndAES128-CBC"
+        # Encrypt the private key with the user's password using cryptography library
+        encrypted_private_key = user_key_obj.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.BestAvailableEncryption(password.encode('utf-8'))
         ).decode('utf-8')
 
         users[username] = {
@@ -292,7 +298,22 @@ def login_user(username, password):
         )
         
         encrypted_priv_key_pem = user_data['encrypted_private_key']
-        signing_key = RSA.import_key(encrypted_priv_key_pem, passphrase=password)
+        
+        # Load the encrypted private key using cryptography library
+        crypto_signing_key = serialization.load_pem_private_key(
+            encrypted_priv_key_pem.encode('utf-8'),
+            password=password.encode('utf-8'),
+            backend=default_backend()
+        )
+        
+        # Convert to pycryptodome RSA key for signing operations
+        signing_key = RSA.import_key(
+            crypto_signing_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+        )
         
         return (True, master_key, signing_key, "Login successful.")
 
